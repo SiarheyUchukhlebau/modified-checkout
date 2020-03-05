@@ -1,7 +1,9 @@
 <?php
+
 namespace SR\ModifiedCheckout\Plugin\Block;
 
 use Magento\Customer\Model\AttributeMetadataDataProvider;
+use Magento\Customer\Model\Options;
 use Magento\Ui\Component\Form\AttributeMapper;
 use Magento\Checkout\Block\Checkout\AttributeMerger;
 use Magento\Checkout\Model\Session as CheckoutSession;
@@ -40,23 +42,28 @@ class LayoutProcessor
      * @param AttributeMapper $attributeMapper
      * @param AttributeMerger $merger
      * @param CheckoutSession $checkoutSession
+     * @param Options $options
      */
     public function __construct(
         AttributeMetadataDataProvider $attributeMetadataDataProvider,
         AttributeMapper $attributeMapper,
         AttributeMerger $merger,
-        CheckoutSession $checkoutSession
+        CheckoutSession $checkoutSession,
+        Options $options
     ) {
         $this->attributeMetadataDataProvider = $attributeMetadataDataProvider;
-        $this->attributeMapper = $attributeMapper;
-        $this->merger = $merger;
-        $this->checkoutSession = $checkoutSession;
+        $this->attributeMapper               = $attributeMapper;
+        $this->merger                        = $merger;
+        $this->checkoutSession               = $checkoutSession;
+        $this->options                       = $options;
     }
 
     /**
      * Get Quote
      *
      * @return \Magento\Quote\Model\Quote|null
+     * @throws \Magento\Framework\Exception\LocalizedException
+     * @throws \Magento\Framework\Exception\NoSuchEntityException
      */
     public function getQuote()
     {
@@ -69,8 +76,11 @@ class LayoutProcessor
 
     /**
      * @param \Magento\Checkout\Block\Checkout\LayoutProcessor $subject
+     * @param \Closure $proceed
      * @param array $jsLayout
      * @return array
+     * @throws \Magento\Framework\Exception\LocalizedException
+     * @throws \Magento\Framework\Exception\NoSuchEntityException
      */
     public function aroundProcess(
         \Magento\Checkout\Block\Checkout\LayoutProcessor $subject,
@@ -80,26 +90,45 @@ class LayoutProcessor
 
         $jsLayoutResult = $proceed($jsLayout);
 
-        if($this->getQuote()->isVirtual()) {
+        if ($this->getQuote()->isVirtual()) {
             return $jsLayoutResult;
         }
 
-        if(isset($jsLayoutResult['components']['checkout']['children']['steps']['children']['shipping-step']['children']
-            ['shippingAddress']['children']['shipping-address-fieldset'])) {
+        $attributesToConvert = [
+            'prefix' => [$this->options, 'getNamePrefixOptions'],
+            'suffix' => [$this->options, 'getNameSuffixOptions'],
+        ];
+
+        if (isset(
+            $jsLayoutResult['components']['checkout']['children']['steps']['children']['shipping-step']['children']
+            ['shippingAddress']['children']['shipping-address-fieldset']
+        )) {
 
             $jsLayoutResult['components']['checkout']['children']['steps']['children']['shipping-step']
-            ['children']['shippingAddress']['children']['shipping-address-fieldset']['children']['street']['children'][0]['placeholder'] = __('Street Address');
+            ['children']['shippingAddress']['children']['shipping-address-fieldset']['children']['street']['children'][0]['placeholder'] = __(
+                'Street Address'
+            );
             $jsLayoutResult['components']['checkout']['children']['steps']['children']['shipping-step']
-            ['children']['shippingAddress']['children']['shipping-address-fieldset']['children']['street']['children'][1]['placeholder'] = __('Street line 2');
+            ['children']['shippingAddress']['children']['shipping-address-fieldset']['children']['street']['children'][1]['placeholder'] = __(
+                'Street line 2'
+            );
 
             $elements = $this->getAddressAttributes();
-            $jsLayoutResult['components']['checkout']['children']['steps']['children']['shipping-step']
-            ['children']['shippingAddress']['children']['billing-address'] = $this->getCustomBillingAddressComponent($elements);
+            $elements = $this->convertElementsToSelect($elements, $attributesToConvert);
 
             $jsLayoutResult['components']['checkout']['children']['steps']['children']['shipping-step']
-            ['children']['shippingAddress']['children']['billing-address']['children']['form-fields']['children']['street']['children'][0]['placeholder'] = __('Street Address');
+            ['children']['shippingAddress']['children']['billing-address'] = $this->getCustomBillingAddressComponent(
+                $elements
+            );
+
             $jsLayoutResult['components']['checkout']['children']['steps']['children']['shipping-step']
-            ['children']['shippingAddress']['children']['billing-address']['children']['form-fields']['children']['street']['children'][1]['placeholder'] = __('Street line 2');
+            ['children']['shippingAddress']['children']['billing-address']['children']['form-fields']['children']['street']['children'][0]['placeholder'] = __(
+                'Street Address'
+            );
+            $jsLayoutResult['components']['checkout']['children']['steps']['children']['shipping-step']
+            ['children']['shippingAddress']['children']['billing-address']['children']['form-fields']['children']['street']['children'][1]['placeholder'] = __(
+                'Street line 2'
+            );
         }
 
         return $jsLayoutResult;
@@ -109,6 +138,7 @@ class LayoutProcessor
      * Get all visible address attribute
      *
      * @return array
+     * @throws \Magento\Framework\Exception\LocalizedException
      */
     private function getAddressAttributes()
     {
@@ -126,10 +156,42 @@ class LayoutProcessor
             }
             $elements[$code] = $this->attributeMapper->map($attribute);
             if (isset($elements[$code]['label'])) {
-                $label = $elements[$code]['label'];
+                $label                    = $elements[$code]['label'];
                 $elements[$code]['label'] = __($label);
             }
         }
+
+        return $elements;
+    }
+
+    /**
+     * @param array $elements
+     * @param array $attributesToConvert
+     * @return array
+     */
+    private function convertElementsToSelect(array $elements, array $attributesToConvert): array
+    {
+        $codes = array_keys($attributesToConvert);
+        foreach (array_keys($elements) as $code) {
+            if (!in_array($code, $codes)) {
+                continue;
+            }
+
+            $options = call_user_func($attributesToConvert[$code]);
+            if (!is_array($options)) {
+                continue;
+            }
+            $elements[$code]['dataType'] = 'select';
+            $elements[$code]['formElement'] = 'select';
+
+            foreach ($options as $key => $value) {
+                $elements[$code]['options'][] = [
+                    'value' => $key,
+                    'label' => $value,
+                ];
+            }
+        }
+
         return $elements;
     }
 
@@ -142,16 +204,16 @@ class LayoutProcessor
     public function getCustomBillingAddressComponent($elements)
     {
         return [
-            'component' => 'SR_ModifiedCheckout/js/view/billing-address',
-            'displayArea' => 'billing-address',
-            'provider' => 'checkoutProvider',
-            'deps' => ['checkoutProvider'],
+            'component'       => 'SR_ModifiedCheckout/js/view/billing-address',
+            'displayArea'     => 'billing-address',
+            'provider'        => 'checkoutProvider',
+            'deps'            => ['checkoutProvider'],
             'dataScopePrefix' => 'billingAddress',
-            'children' => [
+            'children'        => [
                 'form-fields' => [
-                    'component' => 'uiComponent',
+                    'component'   => 'uiComponent',
                     'displayArea' => 'additional-fieldsets',
-                    'children' => $this->merger->merge(
+                    'children'    => $this->merger->merge(
                         $elements,
                         'checkoutProvider',
                         'billingAddress',
@@ -159,41 +221,41 @@ class LayoutProcessor
                             'country_id' => [
                                 'sortOrder' => 115,
                             ],
-                            'region' => [
+                            'region'     => [
                                 'visible' => false,
                             ],
-                            'region_id' => [
-                                'component' => 'Magento_Ui/js/form/element/region',
-                                'config' => [
-                                    'template' => 'ui/form/field',
+                            'region_id'  => [
+                                'component'  => 'Magento_Ui/js/form/element/region',
+                                'config'     => [
+                                    'template'    => 'ui/form/field',
                                     'elementTmpl' => 'ui/form/element/select',
                                     'customEntry' => 'billingAddress.region',
                                 ],
                                 'validation' => [
                                     'required-entry' => true,
                                 ],
-                                'filterBy' => [
+                                'filterBy'   => [
                                     'target' => '${ $.provider }:${ $.parentScope }.country_id',
-                                    'field' => 'country_id',
+                                    'field'  => 'country_id',
                                 ],
                             ],
-                            'postcode' => [
-                                'component' => 'Magento_Ui/js/form/element/post-code',
+                            'postcode'   => [
+                                'component'  => 'Magento_Ui/js/form/element/post-code',
                                 'validation' => [
                                     'required-entry' => true,
                                 ],
                             ],
-                            'company' => [
+                            'company'    => [
                                 'validation' => [
                                     'min_text_length' => 0,
                                 ],
                             ],
-                            'fax' => [
+                            'fax'        => [
                                 'validation' => [
                                     'min_text_length' => 0,
                                 ],
                             ],
-                            'telephone' => [
+                            'telephone'  => [
                                 'config' => [
                                     'tooltip' => [
                                         'description' => __('For delivery questions.'),
